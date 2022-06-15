@@ -43,7 +43,6 @@ module Network.HTTP2.Client (
     , module Network.HTTP2.Client.FrameConnection
     , module Network.HTTP2.Client.Exceptions
     , module Network.Socket
-    , module Network.TLS
     ) where
 
 import           Control.Concurrent.Async.Lifted (Async, async, race, withAsync, link)
@@ -59,7 +58,6 @@ import           Data.Maybe (fromMaybe)
 import           Network.HPACK as HPACK
 import           Network.HTTP2 as HTTP2
 import           Network.Socket (HostName, PortNumber)
-import           Network.TLS (ClientParams)
 
 import           Network.HTTP2.Client.Channels
 import           Network.HTTP2.Client.Dispatch
