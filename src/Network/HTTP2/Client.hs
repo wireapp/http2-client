@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | This module defines a set of low-level primitives for starting an HTTP2
 -- session and interacting with a server.
@@ -45,8 +46,8 @@ module Network.HTTP2.Client (
     , module Network.Socket
     ) where
 
-import           Control.Concurrent.Async.Lifted (Async, async, race, withAsync, link)
-import           Control.Exception.Lifted (bracket, throwIO, SomeException, catch)
+import           Control.Concurrent.Async.Lifted (Async, ExceptionInLinkedThread(..), async, race, withAsync, link)
+import           Control.Exception.Lifted (bracket, fromException, throwIO, SomeException, catch)
 import           Control.Concurrent.MVar.Lifted (newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar)
 import           Control.Concurrent.Lifted (threadDelay)
 import           Control.Monad (forever, void, when, forM_)
@@ -58,6 +59,7 @@ import           Data.Maybe (fromMaybe)
 import           Network.HPACK as HPACK
 import           Network.HTTP2 as HTTP2
 import           Network.Socket (HostName, PortNumber)
+import qualified OpenSSL.Session as SSL
 
 import           Network.HTTP2.Client.Channels
 import           Network.HTTP2.Client.Dispatch
@@ -504,7 +506,17 @@ initializeStream conn dispatch control stream windowUpdatesChan getWork initialS
             when (testEndStream $ flags 0) $ do
                 closeLocalStream dispatch sid
             return cst
-    let _waitEvent    = readChan events
+    let handleLinkedException err@(ExceptionInLinkedThread _ inner) = case () of
+          ()
+            -- Handling SSL.ConnectionAbruptlyTerminated as a stream end since some sites
+            -- terminate the SSL connection right after returning the data
+            | Just (_ :: SSL.ConnectionAbruptlyTerminated) <- fromException inner -> do
+                let flags = setEndStream defaultFlags
+                    fh    = FrameHeader 0 flags 0
+                return $ StreamHeadersEvent fh []
+            | otherwise -> throwIO err
+    let _waitEvent =
+             readChan events `catch` \(err :: ExceptionInLinkedThread) -> handleLinkedException err
     let _sendDataChunk flags dat = do
             sendDataFrame frameStream flags dat
             when (testEndStream $ flags 0) $ do
