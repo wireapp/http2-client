@@ -10,7 +10,7 @@ main :: IO ()
 main = hspec $ do
     describe "FrameConnection" $ do
         it "can make a FrameConnection" $ do
-            sslContext <- SSL.context
+            sslContext <- makeSSLContext defaultOpenSSLSettings
             eitherFrameConn <- runClientIO $ newHttp2FrameConnection "wire.com" 443 (Just sslContext)
             frameConn <- extractFrameConn eitherFrameConn
             runClientIO $ runHttp2Client frameConn 8192 8192 [(SettingsInitialWindowSize,10000000)] defaultGoAwayHandler ignoreFallbackHandler $ \conn -> do

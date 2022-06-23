@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE RankNTypes  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.HTTP2.Client.RawConnection (
       RawHttp2Connection (..)
@@ -56,7 +57,7 @@ newRawHttp2Connection host port sslContext = do
         setSocketOption skt NoDelay 1
         connect skt (addrAddress addr)
         pure skt
-    newRawHttp2ConnectionSocket rSkt sslContext
+    newRawHttp2ConnectionSocket rSkt sslContext host
 
 -- | Initiates a RawHttp2Connection with a unix domain socket.
 --
@@ -65,13 +66,15 @@ newRawHttp2ConnectionUnix :: String
                           -- ^ Path to the socket.
                           -> Maybe SSLContext
                           -- ^ SSL context
+                          -> HostName
+                          -- ^ Server's hostname.
                           -> ClientIO RawHttp2Connection
-newRawHttp2ConnectionUnix path sslContext = do
+newRawHttp2ConnectionUnix path sslContext host = do
     rSkt <- lift $ do
         skt <- socket AF_UNIX Stream 0
         connect skt $ SockAddrUnix path
         pure skt
-    newRawHttp2ConnectionSocket rSkt sslContext
+    newRawHttp2ConnectionSocket rSkt sslContext host
 
 -- | Initiates a RawHttp2Connection with a server over a connected socket.
 --
@@ -82,10 +85,12 @@ newRawHttp2ConnectionSocket
   -- ^ A connected socket.
   -> Maybe SSLContext
   -- ^ SSL context
+  -> HostName
+  -- ^ Server's hostname.
   -> ClientIO RawHttp2Connection
-newRawHttp2ConnectionSocket skt sslContext = do
+newRawHttp2ConnectionSocket skt sslContext host = do
     -- Prepare structure with abstract API.
-    conn <- lift $ maybe (plainTextRaw skt) (tlsRaw skt) sslContext
+    conn <- lift $ maybe (plainTextRaw skt) (tlsRaw host skt) sslContext
 
     -- Initializes the HTTP2 stream.
     _sendRaw conn [HTTP2.connectionPreface]
@@ -99,19 +104,24 @@ plainTextRaw skt = do
     let doClose = lift $ cancel a >> cancel b >> close skt
     return $ RawHttp2Connection (lift . atomically . putRaw) (lift . atomically . getRaw) doClose
 
-tlsRaw :: Socket -> SSLContext -> IO RawHttp2Connection
-tlsRaw skt sslContext = withOpenSSL $ do
-    -- Connects to SSL
-    ssl <- SSL.connection sslContext skt
-    SSL.connect ssl
-
+tlsRaw :: HostName -> Socket -> SSLContext-> IO RawHttp2Connection
+tlsRaw host skt sslContext = withOpenSSL $ do
+    ssl <- makeSSLConnection host skt sslContext
     (b,putRaw) <- startWriteWorker (SSL.write ssl . ByteString.concat)
     (a,getRaw) <- startReadWorker (const $ SSL.read ssl numBytes)
-    let doClose = lift $ cancel a >> cancel b >> SSL.shutdown ssl SSL.Bidirectional
+    let doClose = lift $ cancel a >> cancel b >> SSL.shutdown ssl SSL.Unidirectional
 
     return $ RawHttp2Connection (lift . atomically . putRaw) (lift . atomically . getRaw) doClose
   where
     numBytes = 16 * 1024
+
+makeSSLConnection :: HostName -> Socket -> SSLContext -> IO SSL.SSL
+makeSSLConnection host skt sslContext = do
+    ssl <- SSL.connection sslContext skt
+    SSL.setTlsextHostName ssl host
+    SSL.enableHostnameValidation ssl host
+    SSL.connect ssl
+    return ssl
 
 startWriteWorker
   :: ([ByteString] -> IO ())

@@ -25,6 +25,10 @@ module Network.HTTP2.Client (
     , TooMuchConcurrency(..)
     , StreamThread
     , Http2Stream(..)
+    -- * OpenSSL support
+    , makeSSLContext
+    , OpenSSLSettings(..)
+    , defaultOpenSSLSettings
     -- * Flow control
     , IncomingFlowControl(..)
     , OutgoingFlowControl(..)
@@ -60,6 +64,7 @@ import           Network.HPACK as HPACK
 import           Network.HTTP2 as HTTP2
 import           Network.Socket (HostName, PortNumber)
 import qualified OpenSSL.Session as SSL
+import qualified OpenSSL.X509.SystemStore as SSL (contextLoadSystemCerts)
 
 import           Network.HTTP2.Client.Channels
 import           Network.HTTP2.Client.Dispatch
@@ -970,3 +975,58 @@ delayException act = act `catch` slowdown
     slowdown :: SomeException -> ClientIO a
     slowdown e = threadDelay 50000 >> throwIO e
 
+
+-- | Returns an action that sets up a 'SSL.SSLContext' with the given
+-- 'OpenSSLSettings'.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+makeSSLContext :: OpenSSLSettings -> IO SSL.SSLContext
+makeSSLContext OpenSSLSettings{..} = do
+    ctx <- SSL.context
+    SSL.contextSetVerificationMode ctx osslSettingsVerifyMode
+    SSL.contextSetCiphers ctx osslSettingsCiphers
+    mapM_ (SSL.contextAddOption ctx) osslSettingsOptions
+    osslSettingsLoadCerts ctx
+    return ctx
+
+-- | SSL settings as used by 'makeSSLContext' to set up an 'SSL.SSLContext'.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+data OpenSSLSettings = OpenSSLSettings
+    { osslSettingsOptions :: [SSL.SSLOption]
+      -- ^ SSL options, as passed to 'SSL.contextAddOption'
+    , osslSettingsVerifyMode :: SSL.VerificationMode
+      -- ^ SSL verification mode, as passed to 'SSL.contextSetVerificationMode'
+    , osslSettingsCiphers :: String
+      -- ^ SSL cipher list, as passed to 'SSL.contextSetCiphers'
+    , osslSettingsLoadCerts :: SSL.SSLContext -> IO ()
+      -- ^ An action to load certificates into the context, typically using
+      -- 'SSL.contextSetCAFile' or 'SSL.contextSetCaDirectory'.
+    }
+
+-- | Default OpenSSL settings. In particular:
+--
+--  * SSLv2 and SSLv3 are disabled
+--  * Hostname validation
+--  * @DEFAULT@ cipher list
+--  * Certificates loaded from OS-specific store
+--
+-- Note that these settings might change in the future.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+defaultOpenSSLSettings :: OpenSSLSettings
+defaultOpenSSLSettings = OpenSSLSettings
+    { osslSettingsOptions =
+        [ SSL.SSL_OP_ALL -- enable bug workarounds
+        , SSL.SSL_OP_NO_SSLv2
+        , SSL.SSL_OP_NO_SSLv3
+        ]
+    , osslSettingsVerifyMode = SSL.VerifyPeer
+        -- vpFailIfNoPeerCert and vpClientOnce are only relevant for servers
+        { SSL.vpFailIfNoPeerCert = False
+        , SSL.vpClientOnce = False
+        , SSL.vpCallback = Nothing
+        }
+    , osslSettingsCiphers = "DEFAULT"
+    , osslSettingsLoadCerts = SSL.contextLoadSystemCerts
+    }
