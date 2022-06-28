@@ -135,6 +135,7 @@ writeWorkerLoop outQ sendChunks = forever $ do
         when (null chunks) retry
         writeTVar outQ []
         return chunks
+    putStrLn $ "* Sending chunk: " ++ show xs
     sendChunks xs
 
 startReadWorker
@@ -155,6 +156,7 @@ readWorkerLoop buf next onEof = go
   where
     go = do
         dat <- next 4096
+        putStrLn $ "* Bytes received: " ++ show dat
         if ByteString.null dat
         then onEof
         else atomically (modifyTVar' buf (\bs -> (bs <> dat))) >> go
