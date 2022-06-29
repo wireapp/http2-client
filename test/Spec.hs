@@ -11,7 +11,7 @@ main = hspec $ do
     describe "FrameConnection" $ do
         it "can make a FrameConnection" $ do
             sslContext <- makeSSLContext defaultOpenSSLSettings
-            eitherFrameConn <- runClientIO $ newHttp2FrameConnection "wire.com" 443 (Just sslContext)
+            eitherFrameConn <- runClientIO $ newHttp2FrameConnection "www.siefkes.net" 443 (Just sslContext)
             frameConn <- extractFrameConn eitherFrameConn
             runClientIO $ runHttp2Client frameConn 8192 8192 [(SettingsInitialWindowSize,10000000)] defaultGoAwayHandler ignoreFallbackHandler $ \conn -> do
                 let fc = _incomingFlowControl conn
@@ -19,8 +19,8 @@ main = hspec $ do
                 _ <- _updateWindow fc
                 let requestHeaders = [ (":method", "GET")
                                      , (":scheme", "https")
-                                     , (":path", "/en/about/")
-                                     , (":authority", "wire.com")
+                                     , (":path", "/contact/")
+                                     , (":authority", "www.siefkes.net")
                                      ]
                 withHttp2Stream conn $ \stream ->
                   let
