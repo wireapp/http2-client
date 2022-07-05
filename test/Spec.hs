@@ -10,7 +10,9 @@ main :: IO ()
 main = hspec $ do
     describe "FrameConnection" $ do
         it "can make a FrameConnection" $ do
-            sslContext <- makeSSLContext defaultOpenSSLSettings
+            let osslSettings = defaultOpenSSLSettings
+            -- TODO Set a specific cipher for debugging
+            sslContext <- makeSSLContext osslSettings { osslSettingsCiphers = "ECDHE-RSA-AES128-GCM-SHA256" }
             eitherFrameConn <- runClientIO $ newHttp2FrameConnection "www.siefkes.net" 443 (Just sslContext)
             frameConn <- extractFrameConn eitherFrameConn
             runClientIO $ runHttp2Client frameConn 8192 8192 [(SettingsInitialWindowSize,10000000)] defaultGoAwayHandler ignoreFallbackHandler $ \conn -> do
