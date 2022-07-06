@@ -10,9 +10,15 @@ main :: IO ()
 main = hspec $ do
     describe "FrameConnection" $ do
         it "can make a FrameConnection" $ do
-            let osslSettings = defaultOpenSSLSettings
-            -- TODO Set a specific cipher for debugging
-            sslContext <- makeSSLContext osslSettings { osslSettingsCiphers = "ECDHE-RSA-AES128-GCM-SHA256" }
+            -- This set a specific cipher for debugging, however, certain TLS1.3 ciphersuites
+            -- cannot be disabled
+            --let osslSettings = defaultOpenSSLSettings
+            --sslContext <- makeSSLContext osslSettings { osslSettingsCiphers = "ECDHE-RSA-AES128-GCM-SHA256" }
+
+            sslContext <- makeSSLContext defaultOpenSSLSettings
+            -- Load a specific private key to allow monitoring the connection in Wireshark
+            -- (but it still seems unable to decode)
+            --SSL.contextSetPrivateKeyFile sslContext "osslkey.pem"
             eitherFrameConn <- runClientIO $ newHttp2FrameConnection "www.siefkes.net" 443 (Just sslContext)
             frameConn <- extractFrameConn eitherFrameConn
             runClientIO $ runHttp2Client frameConn 8192 8192 [(SettingsInitialWindowSize,10000000)] defaultGoAwayHandler ignoreFallbackHandler $ \conn -> do
