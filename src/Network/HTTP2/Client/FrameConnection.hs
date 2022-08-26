@@ -25,7 +25,7 @@ import qualified Data.ByteString as ByteString
 import           Network.HTTP2 (FrameHeader(..), FrameFlags, FramePayload, HTTP2Error, encodeInfo, decodeFramePayload)
 import qualified Network.HTTP2 as HTTP2
 import           Network.Socket (HostName, PortNumber)
-import qualified Network.TLS as TLS
+import           OpenSSL.Session (SSLContext)
 
 import           Network.HTTP2.Client.Exceptions
 import           Network.HTTP2.Client.RawConnection
@@ -118,7 +118,7 @@ frameHttp2RawConnection http2conn = do
 -- | Creates a new 'Http2FrameConnection' to a given host for a frame-to-frame communication.
 newHttp2FrameConnection :: HostName
                         -> PortNumber
-                        -> Maybe TLS.ClientParams
+                        -> Maybe SSLContext
                         -> ClientIO Http2FrameConnection
-newHttp2FrameConnection host port params = do
-    frameHttp2RawConnection =<< newRawHttp2Connection host port params
+newHttp2FrameConnection host port sslContext = do
+    frameHttp2RawConnection =<< newRawHttp2Connection host port sslContext

@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE RankNTypes  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.HTTP2.Client.RawConnection (
       RawHttp2Connection (..)
@@ -15,12 +16,13 @@ import           Control.Concurrent.STM (STM, atomically, check, orElse, retry, 
 import           Control.Concurrent.STM.TVar (TVar, modifyTVar', newTVarIO, readTVar, writeTVar)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
-import           Data.ByteString.Lazy (fromChunks)
 import           Data.Monoid ((<>))
 import qualified Network.HTTP2 as HTTP2
 import           Network.Socket hiding (recv)
 import           Network.Socket.ByteString
-import qualified Network.TLS as TLS
+import           OpenSSL (withOpenSSL)
+import           OpenSSL.Session (SSLContext)
+import qualified OpenSSL.Session as SSL
 
 import           Network.HTTP2.Client.Exceptions
 
@@ -43,11 +45,10 @@ newRawHttp2Connection :: HostName
                       -- ^ Server's hostname.
                       -> PortNumber
                       -- ^ Server's port to connect to.
-                      -> Maybe TLS.ClientParams
-                      -- ^ TLS parameters. The 'TLS.onSuggestALPN' hook is
-                      -- overwritten to always return ["h2", "h2-17"].
+                      -> Maybe SSLContext
+                      -- ^ SSL context
                       -> ClientIO RawHttp2Connection
-newRawHttp2Connection host port mparams = do
+newRawHttp2Connection host port sslContext = do
     -- Connects to TCP.
     let hints = defaultHints { addrFlags = [AI_NUMERICSERV], addrSocketType = Stream }
     rSkt <- lift $ do
@@ -56,23 +57,24 @@ newRawHttp2Connection host port mparams = do
         setSocketOption skt NoDelay 1
         connect skt (addrAddress addr)
         pure skt
-    newRawHttp2ConnectionSocket rSkt mparams
+    newRawHttp2ConnectionSocket rSkt sslContext host
 
 -- | Initiates a RawHttp2Connection with a unix domain socket.
 --
 -- The current code does not handle closing the connexion, yikes.
 newRawHttp2ConnectionUnix :: String
                           -- ^ Path to the socket.
-                          -> Maybe TLS.ClientParams
-                          -- ^ TLS parameters. The 'TLS.onSuggestALPN' hook is
-                          -- overwritten to always return ["h2", "h2-17"].
+                          -> Maybe SSLContext
+                          -- ^ SSL context
+                          -> HostName
+                          -- ^ Server's hostname.
                           -> ClientIO RawHttp2Connection
-newRawHttp2ConnectionUnix path mparams = do
+newRawHttp2ConnectionUnix path sslContext host = do
     rSkt <- lift $ do
         skt <- socket AF_UNIX Stream 0
         connect skt $ SockAddrUnix path
         pure skt
-    newRawHttp2ConnectionSocket rSkt mparams
+    newRawHttp2ConnectionSocket rSkt sslContext host
 
 -- | Initiates a RawHttp2Connection with a server over a connected socket.
 --
@@ -81,13 +83,14 @@ newRawHttp2ConnectionUnix path mparams = do
 newRawHttp2ConnectionSocket
   :: Socket
   -- ^ A connected socket.
-  -> Maybe TLS.ClientParams
-  -- ^ TLS parameters. The 'TLS.onSuggestALPN' hook is
-  -- overwritten to always return ["h2", "h2-17"].
+  -> Maybe SSLContext
+  -- ^ SSL context
+  -> HostName
+  -- ^ Server's hostname.
   -> ClientIO RawHttp2Connection
-newRawHttp2ConnectionSocket skt mparams = do
+newRawHttp2ConnectionSocket skt sslContext host = do
     -- Prepare structure with abstract API.
-    conn <- lift $ maybe (plainTextRaw skt) (tlsRaw skt) mparams
+    conn <- lift $ maybe (plainTextRaw skt) (tlsRaw host skt) sslContext
 
     -- Initializes the HTTP2 stream.
     _sendRaw conn [HTTP2.connectionPreface]
@@ -101,23 +104,24 @@ plainTextRaw skt = do
     let doClose = lift $ cancel a >> cancel b >> close skt
     return $ RawHttp2Connection (lift . atomically . putRaw) (lift . atomically . getRaw) doClose
 
-tlsRaw :: Socket -> TLS.ClientParams -> IO RawHttp2Connection
-tlsRaw skt params = do
-    -- Connects to SSL
-    tlsContext <- TLS.contextNew skt (modifyParams params)
-    TLS.handshake tlsContext
-
-    (b,putRaw) <- startWriteWorker (TLS.sendData tlsContext . fromChunks)
-    (a,getRaw) <- startReadWorker (const $ TLS.recvData tlsContext)
-    let doClose       = lift $ cancel a >> cancel b >> TLS.bye tlsContext >> TLS.contextClose tlsContext
+tlsRaw :: HostName -> Socket -> SSLContext-> IO RawHttp2Connection
+tlsRaw host skt sslContext = withOpenSSL $ do
+    ssl <- makeSSLConnection host skt sslContext
+    (b,putRaw) <- startWriteWorker (SSL.write ssl . ByteString.concat)
+    (a,getRaw) <- startReadWorker (const $ SSL.read ssl numBytes)
+    let doClose = lift $ cancel a >> cancel b >> SSL.shutdown ssl SSL.Unidirectional
 
     return $ RawHttp2Connection (lift . atomically . putRaw) (lift . atomically . getRaw) doClose
   where
-    modifyParams prms = prms {
-        TLS.clientHooks = (TLS.clientHooks prms) {
-            TLS.onSuggestALPN = return $ Just [ "h2", "h2-17" ]
-          }
-      }
+    numBytes = 16 * 1024
+
+makeSSLConnection :: HostName -> Socket -> SSLContext -> IO SSL.SSL
+makeSSLConnection host skt sslContext = do
+    ssl <- SSL.connection sslContext skt
+    SSL.setTlsextHostName ssl host
+    SSL.enableHostnameValidation ssl host
+    SSL.connect ssl
+    return ssl
 
 startWriteWorker
   :: ([ByteString] -> IO ())
@@ -135,6 +139,7 @@ writeWorkerLoop outQ sendChunks = forever $ do
         when (null chunks) retry
         writeTVar outQ []
         return chunks
+    putStrLn $ "* Sending chunk: " ++ show xs  -- TODO Added for debugging
     sendChunks xs
 
 startReadWorker
@@ -155,6 +160,7 @@ readWorkerLoop buf next onEof = go
   where
     go = do
         dat <- next 4096
+        putStrLn $ "* Bytes received: " ++ show dat  -- TODO Added for debugging
         if ByteString.null dat
         then onEof
         else atomically (modifyTVar' buf (\bs -> (bs <> dat))) >> go

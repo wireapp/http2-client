@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | This module defines a set of low-level primitives for starting an HTTP2
 -- session and interacting with a server.
@@ -24,6 +25,10 @@ module Network.HTTP2.Client (
     , TooMuchConcurrency(..)
     , StreamThread
     , Http2Stream(..)
+    -- * OpenSSL support
+    , makeSSLContext
+    , OpenSSLSettings(..)
+    , defaultOpenSSLSettings
     -- * Flow control
     , IncomingFlowControl(..)
     , OutgoingFlowControl(..)
@@ -43,11 +48,10 @@ module Network.HTTP2.Client (
     , module Network.HTTP2.Client.FrameConnection
     , module Network.HTTP2.Client.Exceptions
     , module Network.Socket
-    , module Network.TLS
     ) where
 
-import           Control.Concurrent.Async.Lifted (Async, async, race, withAsync, link)
-import           Control.Exception.Lifted (bracket, throwIO, SomeException, catch)
+import           Control.Concurrent.Async.Lifted (Async, ExceptionInLinkedThread(..), async, race, withAsync, link)
+import           Control.Exception.Lifted (bracket, fromException, throwIO, SomeException, catch)
 import           Control.Concurrent.MVar.Lifted (newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar)
 import           Control.Concurrent.Lifted (threadDelay)
 import           Control.Monad (forever, void, when, forM_)
@@ -59,7 +63,8 @@ import           Data.Maybe (fromMaybe)
 import           Network.HPACK as HPACK
 import           Network.HTTP2 as HTTP2
 import           Network.Socket (HostName, PortNumber)
-import           Network.TLS (ClientParams)
+import qualified OpenSSL.Session as SSL
+import qualified OpenSSL.X509.SystemStore as SSL (contextLoadSystemCerts)
 
 import           Network.HTTP2.Client.Channels
 import           Network.HTTP2.Client.Dispatch
@@ -506,7 +511,17 @@ initializeStream conn dispatch control stream windowUpdatesChan getWork initialS
             when (testEndStream $ flags 0) $ do
                 closeLocalStream dispatch sid
             return cst
-    let _waitEvent    = readChan events
+    let handleLinkedException err@(ExceptionInLinkedThread _ inner) = case () of
+          ()
+            -- Handling SSL.ConnectionAbruptlyTerminated as a stream end since some sites
+            -- terminate the SSL connection right after returning the data
+            | Just (_ :: SSL.ConnectionAbruptlyTerminated) <- fromException inner -> do
+                let flags = setEndStream defaultFlags
+                    fh    = FrameHeader 0 flags 0
+                return $ StreamHeadersEvent fh []
+            | otherwise -> throwIO err
+    let _waitEvent =
+             readChan events `catch` \(err :: ExceptionInLinkedThread) -> handleLinkedException err
     let _sendDataChunk flags dat = do
             sendDataFrame frameStream flags dat
             when (testEndStream $ flags 0) $ do
@@ -960,3 +975,58 @@ delayException act = act `catch` slowdown
     slowdown :: SomeException -> ClientIO a
     slowdown e = threadDelay 50000 >> throwIO e
 
+
+-- | Returns an action that sets up a 'SSL.SSLContext' with the given
+-- 'OpenSSLSettings'.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+makeSSLContext :: OpenSSLSettings -> IO SSL.SSLContext
+makeSSLContext OpenSSLSettings{..} = do
+    ctx <- SSL.context
+    SSL.contextSetVerificationMode ctx osslSettingsVerifyMode
+    SSL.contextSetCiphers ctx osslSettingsCiphers
+    mapM_ (SSL.contextAddOption ctx) osslSettingsOptions
+    osslSettingsLoadCerts ctx
+    return ctx
+
+-- | SSL settings as used by 'makeSSLContext' to set up an 'SSL.SSLContext'.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+data OpenSSLSettings = OpenSSLSettings
+    { osslSettingsOptions :: [SSL.SSLOption]
+      -- ^ SSL options, as passed to 'SSL.contextAddOption'
+    , osslSettingsVerifyMode :: SSL.VerificationMode
+      -- ^ SSL verification mode, as passed to 'SSL.contextSetVerificationMode'
+    , osslSettingsCiphers :: String
+      -- ^ SSL cipher list, as passed to 'SSL.contextSetCiphers'
+    , osslSettingsLoadCerts :: SSL.SSLContext -> IO ()
+      -- ^ An action to load certificates into the context, typically using
+      -- 'SSL.contextSetCAFile' or 'SSL.contextSetCaDirectory'.
+    }
+
+-- | Default OpenSSL settings. In particular:
+--
+--  * SSLv2 and SSLv3 are disabled
+--  * Hostname validation
+--  * @DEFAULT@ cipher list
+--  * Certificates loaded from OS-specific store
+--
+-- Note that these settings might change in the future.
+--
+-- Based on https://github.com/snoyberg/http-client/tree/master/http-client-openssl.
+defaultOpenSSLSettings :: OpenSSLSettings
+defaultOpenSSLSettings = OpenSSLSettings
+    { osslSettingsOptions =
+        [ SSL.SSL_OP_ALL -- enable bug workarounds
+        , SSL.SSL_OP_NO_SSLv2
+        , SSL.SSL_OP_NO_SSLv3
+        ]
+    , osslSettingsVerifyMode = SSL.VerifyPeer
+        -- vpFailIfNoPeerCert and vpClientOnce are only relevant for servers
+        { SSL.vpFailIfNoPeerCert = False
+        , SSL.vpClientOnce = False
+        , SSL.vpCallback = Nothing
+        }
+    , osslSettingsCiphers = "DEFAULT"
+    , osslSettingsLoadCerts = SSL.contextLoadSystemCerts
+    }
